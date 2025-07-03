@@ -865,6 +865,8 @@ def run_scheduler(config_manager: ConfigManager):
     interval_minutes = scheduler_config.get('interval_minutes', 1)
     
     tdh = TDHAutoLogin(config_manager)
+
+    tdh.run_scheduled_task()
     
     # 设置定时任务
     schedule.every(interval_minutes).minutes.do(tdh.run_scheduled_task)
