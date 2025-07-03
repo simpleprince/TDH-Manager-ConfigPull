@@ -1,0 +1,51 @@
+# TDH自动登录脚本配置文件
+# 请根据您的环境修改以下配置
+
+# TDH系统配置
+tdh:
+  base_url: "https://172.18.135.37:8180"
+  username: "user-name"
+  password: "user-password"
+  cluster_id: 1
+
+# 数据库配置
+database:
+  host: "172.18.128.83"
+  port: 3327
+  database: "config"
+  username: "lmt"
+  password: "lmt@123"
+
+# 输出配置
+output:
+  # 是否保存配置文件到本地
+  save_config_file: false
+  # 输出目录
+  output_dir: "tdh_configs"
+  # 是否启用详细日志
+  verbose_logging: true
+
+# 定时任务配置
+scheduler:
+  # 是否启用定时任务
+  enabled: true
+  # 执行间隔（分钟）
+  interval_minutes: 1
+
+# 请求配置
+request:
+  # 请求超时时间（秒）
+  timeout: 30
+  # 请求间隔（秒）
+  delay: 0.5
+  # 最大重试次数
+  max_retries: 3
+
+# 功能开关
+features:
+  # 是否更新数据库
+  update_database: true
+  # 是否清空旧数据
+  clear_old_data: false
+  # 是否获取全局服务
+  get_global_services: true 

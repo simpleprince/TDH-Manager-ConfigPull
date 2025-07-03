@@ -3,6 +3,9 @@
 """
 TDH自动登录脚本
 实现与Java项目相同的登录功能和API调用
+增强版：包含爬取正在运行服务的配置功能，主要输出为CSV格式
+新增：数据库连接和配置更新功能
+支持配置文件，开箱即用
 """
 
 import requests
@@ -15,6 +18,7 @@ import logging
 from typing import Dict, List, Optional, Any
 import time
 import os
+import yaml
 from datetime import datetime
 import csv
 import pymysql
@@ -28,6 +32,54 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+class ConfigManager:
+    """配置管理类"""
+    
+    def __init__(self, config_file: str = "config.yaml"):
+        self.config_file = config_file
+        self.config = self.load_config()
+    
+    def load_config(self) -> Dict:
+        """加载配置文件"""
+        try:
+            if not os.path.exists(self.config_file):
+                logger.error(f"配置文件 {self.config_file} 不存在")
+                raise FileNotFoundError(f"配置文件 {self.config_file} 不存在")
+            
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            
+            logger.info(f"配置文件 {self.config_file} 加载成功")
+            return config
+        except Exception as e:
+            logger.error(f"加载配置文件失败: {str(e)}")
+            raise
+    
+    def get_tdh_config(self) -> Dict:
+        """获取TDH配置"""
+        return self.config.get('tdh', {})
+    
+    def get_database_config(self) -> Dict:
+        """获取数据库配置"""
+        return self.config.get('database', {})
+    
+    def get_output_config(self) -> Dict:
+        """获取输出配置"""
+        return self.config.get('output', {})
+    
+    def get_scheduler_config(self) -> Dict:
+        """获取定时任务配置"""
+        return self.config.get('scheduler', {})
+    
+    def get_request_config(self) -> Dict:
+        """获取请求配置"""
+        return self.config.get('request', {})
+    
+    def get_features_config(self) -> Dict:
+        """获取功能开关配置"""
+        return self.config.get('features', {})
 
 
 class SSLAdapter(HTTPAdapter):
@@ -51,13 +103,13 @@ class SSLAdapter(HTTPAdapter):
 class DatabaseManager:
     """数据库管理类，实现与Java项目相同的数据库操作"""
     
-    def __init__(self, host: str = "172.18.128.83", port: int = 3327, 
-                 database: str = "config", username: str = "lmt", password: str = "lmt@123"):
-        self.host = host
-        self.port = port
-        self.database = database
-        self.username = username
-        self.password = password
+    def __init__(self, config_manager: ConfigManager):
+        db_config = config_manager.get_database_config()
+        self.host = db_config.get('host', 'localhost')
+        self.port = db_config.get('port', 3306)
+        self.database = db_config.get('database', 'config')
+        self.username = db_config.get('username', 'root')
+        self.password = db_config.get('password', '')
         self.connection = None
     
     def connect(self) -> bool:
@@ -197,8 +249,19 @@ class DatabaseManager:
 class TDHAutoLogin:
     """TDH自动登录类"""
     
-    def __init__(self, base_url: str = "https://172.18.135.37:8180", save_config_file: bool = True):
-        self.base_url = base_url
+    def __init__(self, config_manager: ConfigManager):
+        self.config_manager = config_manager
+        
+        # 获取配置
+        tdh_config = config_manager.get_tdh_config()
+        output_config = config_manager.get_output_config()
+        request_config = config_manager.get_request_config()
+        
+        self.base_url = tdh_config.get('base_url', 'https://localhost:8180')
+        self.username = tdh_config.get('username', 'admin')
+        self.password = tdh_config.get('password', 'admin')
+        self.cluster_id = tdh_config.get('cluster_id', 1)
+        
         self.session = requests.Session()
         
         # 配置SSL适配器
@@ -214,41 +277,50 @@ class TDHAutoLogin:
         
         self.is_logged_in = False
         
-        # 新增：是否保存配置文件
-        self.save_config_file = save_config_file
+        # 创建输出目录
+        self.output_dir = output_config.get('output_dir', 'tdh_configs')
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
         
-        # 只有在需要保存配置文件时才创建输出目录
-        if self.save_config_file:
-            # 创建输出目录
-            self.output_dir = "tdh_configs"
-            if not os.path.exists(self.output_dir):
-                os.makedirs(self.output_dir)
-            
-            # 为每次爬取创建独立的时间戳文件夹
-            self.session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.session_output_dir = os.path.join(self.output_dir, f"crawl_{self.session_timestamp}")
-            if not os.path.exists(self.session_output_dir):
-                os.makedirs(self.session_output_dir)
-        else:
-            # 不保存配置文件时，设置空路径
-            self.output_dir = ""
-            self.session_output_dir = ""
-            self.session_timestamp = ""
+        # 为每次爬取创建独立的时间戳文件夹
+        self.session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_output_dir = os.path.join(self.output_dir, f"crawl_{self.session_timestamp}")
+        if not os.path.exists(self.session_output_dir):
+            os.makedirs(self.session_output_dir)
         
         # 初始化数据库管理器
-        self.db_manager = DatabaseManager()
+        self.db_manager = DatabaseManager(config_manager)
+        
+        # 配置参数
+        self.save_config_file = output_config.get('save_config_file', True)
+        self.verbose_logging = output_config.get('verbose_logging', True)
+        self.timeout = request_config.get('timeout', 30)
+        self.delay = request_config.get('delay', 0.5)
+        self.max_retries = request_config.get('max_retries', 3)
+        
+        # 设置日志级别
+        if self.verbose_logging:
+            logging.getLogger().setLevel(logging.INFO)
+        else:
+            logging.getLogger().setLevel(logging.WARNING)
     
-    def login(self, username: str, password: str) -> bool:
+    def login(self, username: str = None, password: str = None) -> bool:
         """
         登录TDH系统
         
         Args:
-            username: 用户名
-            password: 密码
+            username: 用户名（可选，默认使用配置文件中的用户名）
+            password: 密码（可选，默认使用配置文件中的密码）
             
         Returns:
             bool: 登录是否成功
         """
+        # 使用配置文件中的用户名和密码作为默认值
+        if username is None:
+            username = self.username
+        if password is None:
+            password = self.password
+            
         try:
             login_url = f"{self.base_url}/api/users/login"
             
@@ -264,7 +336,7 @@ class TDHAutoLogin:
                 login_url,
                 json=login_data,
                 verify=False,
-                timeout=30
+                timeout=self.timeout
             )
             
             if response.status_code == 200:
@@ -312,16 +384,19 @@ class TDHAutoLogin:
             logger.error(f"获取endpoint过程中发生错误: {str(e)}")
             return None
     
-    def get_services(self, cluster_id: int = 1) -> Optional[List[Dict]]:
+    def get_services(self, cluster_id: int = None) -> Optional[List[Dict]]:
         """
         获取服务列表
         
         Args:
-            cluster_id: 集群ID
+            cluster_id: 集群ID（可选，默认使用配置文件中的集群ID）
             
         Returns:
             List[Dict]: 服务列表
         """
+        if cluster_id is None:
+            cluster_id = self.cluster_id
+            
         try:
             services_url = f"{self.base_url}/api/services?clusterId={cluster_id}"
             
@@ -329,7 +404,7 @@ class TDHAutoLogin:
                 logger.warning("未登录，无法获取服务列表")
                 return None
             
-            response = self.session.get(services_url, verify=False, timeout=30)
+            response = self.session.get(services_url, verify=False, timeout=self.timeout)
             
             if response.status_code == 200:
                 services = response.json()
@@ -486,16 +561,19 @@ class TDHAutoLogin:
             logger.error(f"保存配置到JSON文件时发生错误: {str(e)}")
             return ""
     
-    def get_healthy_services(self, cluster_id: int = 1) -> Optional[List[Dict]]:
+    def get_healthy_services(self, cluster_id: int = None) -> Optional[List[Dict]]:
         """
         获取健康状态的服务列表（包括运行中和已停止但健康的服务）
         
         Args:
-            cluster_id: 集群ID
+            cluster_id: 集群ID（可选，默认使用配置文件中的集群ID）
             
         Returns:
             List[Dict]: 健康状态的服务列表
         """
+        if cluster_id is None:
+            cluster_id = self.cluster_id
+            
         try:
             services = self.get_services(cluster_id)
             if not services:
@@ -519,18 +597,20 @@ class TDHAutoLogin:
             logger.error(f"获取健康服务列表时发生错误: {str(e)}")
             return None
 
-    def crawl_healthy_services_configs(self, cluster_id: int = 1) -> Dict[str, Any]:
+    def crawl_healthy_services_configs(self, cluster_id: int = None) -> Dict[str, Any]:
         """
         爬取健康状态服务的配置，主要输出为CSV格式
         
         Args:
-            cluster_id: 集群ID
+            cluster_id: 集群ID（可选，默认使用配置文件中的集群ID）
             
         Returns:
             Dict: 爬取结果
         """
+        if cluster_id is None:
+            cluster_id = self.cluster_id
+            
         logger.info("开始爬取健康状态服务的配置...")
-        # logger.info(f"输出目录: {self.get_session_output_dir()}")
         
         result = {
             "timestamp": datetime.now().isoformat(),
@@ -594,7 +674,7 @@ class TDHAutoLogin:
                         result["json_files"].append(saved_file)
             
             # 添加延迟避免请求过快
-            time.sleep(0.5)
+            time.sleep(self.delay)
         
         # 主要输出：保存所有配置到CSV文件
         if self.save_config_file and all_configs:
@@ -604,20 +684,24 @@ class TDHAutoLogin:
                 logger.info(f"主要输出：所有配置已保存到CSV文件: {csv_file}")
         
         logger.info(f"爬取完成！共处理 {len(healthy_services)} 个健康服务，获取 {result['total_configs']} 个配置")
-        # logger.info(f"主要输出文件：{result['csv_file']}")
         return result
     
-    def update_database_with_configs(self, cluster_id: int = 1, clear_old_data: bool = False) -> Dict[str, Any]:
+    def update_database_with_configs(self, cluster_id: int = None, clear_old_data: bool = None) -> Dict[str, Any]:
         """
         将配置更新到数据库（实现与Java项目相同的功能）
         
         Args:
-            cluster_id: 集群ID
-            clear_old_data: 是否清空旧数据
+            cluster_id: 集群ID（可选，默认使用配置文件中的集群ID）
+            clear_old_data: 是否清空旧数据（可选，默认使用配置文件中的设置）
             
         Returns:
             Dict: 更新结果
         """
+        if cluster_id is None:
+            cluster_id = self.cluster_id
+        if clear_old_data is None:
+            clear_old_data = self.config_manager.get_features_config().get('clear_old_data', False)
+            
         logger.info("开始更新数据库配置...")
         
         # 连接数据库
@@ -663,30 +747,31 @@ class TDHAutoLogin:
                         
                         logger.info(f"服务 {service.get('name', 'Unknown')} 配置更新完成")
             
-            # 处理全局服务
-            global_services = self.get_global_services()
-            if global_services:
-                for service in global_services:
-                    if service.get('health') != 'HEALTHY':
-                        continue
-                    
-                    # 保存服务信息
-                    service_id = self.db_manager.save_service(
-                        service.get('version', ''),
-                        service.get('type', '')
-                    )
-                    
-                    if service_id:
-                        result["services_updated"] += 1
+            # 处理全局服务（根据配置决定）
+            if self.config_manager.get_features_config().get('get_global_services', True):
+                global_services = self.get_global_services()
+                if global_services:
+                    for service in global_services:
+                        if service.get('health') != 'HEALTHY':
+                            continue
                         
-                        # 获取并保存配置
-                        configs = self.get_service_configs(service.get('id'))
-                        if configs:
-                            for config in configs:
-                                if self.db_manager.save_pull_config(service_id, config):
-                                    result["configs_updated"] += 1
+                        # 保存服务信息
+                        service_id = self.db_manager.save_service(
+                            service.get('version', ''),
+                            service.get('type', '')
+                        )
                         
-                        logger.info(f"全局服务 {service.get('name', 'Unknown')} 配置更新完成")
+                        if service_id:
+                            result["services_updated"] += 1
+                            
+                            # 获取并保存配置
+                            configs = self.get_service_configs(service.get('id'))
+                            if configs:
+                                for config in configs:
+                                    if self.db_manager.save_pull_config(service_id, config):
+                                        result["configs_updated"] += 1
+                            
+                            logger.info(f"全局服务 {service.get('name', 'Unknown')} 配置更新完成")
             
             logger.info(f"数据库更新完成！服务: {result['services_updated']}, 配置: {result['configs_updated']}")
             return result
@@ -699,64 +784,51 @@ class TDHAutoLogin:
             # 断开数据库连接
             self.db_manager.disconnect()
     
-    def run_full_process(self, username: str, password: str, update_database: bool = True, save_config_file: bool = True) -> None:
+    def run_full_process(self, username: str = None, password: str = None, 
+                        update_database: bool = None, save_config_file: bool = None) -> None:
         """
         运行完整的处理流程，主要输出为CSV格式，并可选择更新数据库
         
         Args:
-            username: 用户名
-            password: 密码
-            update_database: 是否更新数据库
-            save_config_file: 是否保存配置文件
+            username: 用户名（可选，默认使用配置文件中的用户名）
+            password: 密码（可选，默认使用配置文件中的密码）
+            update_database: 是否更新数据库（可选，默认使用配置文件中的设置）
+            save_config_file: 是否保存配置文件（可选，默认使用配置文件中的设置）
         """
+        # 使用配置文件中的默认值
+        if update_database is None:
+            update_database = self.config_manager.get_features_config().get('update_database', True)
+        if save_config_file is None:
+            save_config_file = self.config_manager.get_output_config().get('save_config_file', True)
+            
         logger.info("开始TDH自动登录和处理流程")
-        # logger.info(f"本次爬取输出目录: {self.get_session_output_dir()}")
         
         # 1. 登录
         if not self.login(username, password):
             logger.error("登录失败，退出流程")
             return
         
-        # 2. 获取endpoint
-        # endpoint = self.get_endpoint()
-        # if endpoint:
-        #     logger.info(f"Endpoint: {endpoint}")
-        
-        # 3. 爬取健康状态服务的配置（主要输出为CSV）
+        # 2. 爬取健康状态服务的配置（主要输出为CSV）
         logger.info("开始爬取健康状态服务的配置...")
-        # 动态设置是否保存配置文件
-        if save_config_file != self.save_config_file:
-            self.save_config_file = save_config_file
-            # 如果从False变为True，需要创建目录
-            if self.save_config_file and not self.session_output_dir:
-                self.output_dir = "tdh_configs"
-                if not os.path.exists(self.output_dir):
-                    os.makedirs(self.output_dir)
-                self.session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.session_output_dir = os.path.join(self.output_dir, f"crawl_{self.session_timestamp}")
-                if not os.path.exists(self.session_output_dir):
-                    os.makedirs(self.session_output_dir)
-        crawl_result = self.crawl_healthy_services_configs(cluster_id=1)
+        crawl_result = self.crawl_healthy_services_configs()
         
-        # 4. 更新数据库（可选）
+        # 3. 更新数据库（可选）
         if update_database:
             logger.info("开始更新数据库配置...")
-            db_result = self.update_database_with_configs(cluster_id=1)
+            db_result = self.update_database_with_configs()
             if db_result.get("success"):
                 logger.info(f"数据库更新成功！服务: {db_result.get('services_updated', 0)}, 配置: {db_result.get('configs_updated', 0)}")
             else:
                 logger.error(f"数据库更新失败: {db_result.get('error', '未知错误')}")
         
         # 保存爬取结果摘要
-        if self.save_config_file:
+        if save_config_file:
             result_file = os.path.join(self.session_output_dir, f"crawl_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
             with open(result_file, 'w', encoding='utf-8') as f:
                 json.dump(crawl_result, f, indent=2, ensure_ascii=False)
             logger.info(f"爬取结果摘要已保存到: {result_file}")
         
         logger.info("TDH自动登录和处理流程完成")
-        # if crawl_result.get("csv_file"):
-        #     logger.info(f"主要输出文件：{crawl_result['csv_file']}")
 
     def get_session_output_dir(self) -> str:
         """
@@ -765,42 +837,37 @@ class TDHAutoLogin:
         Returns:
             str: 当前会话的输出目录路径
         """
-        if self.save_config_file:
-            return self.session_output_dir
-        else:
-            return ""
+        return self.session_output_dir
     
-    def run_scheduled_task(self, username: str, password: str, update_database: bool = True, save_config_file: bool = True):
+    def run_scheduled_task(self, username: str = None, password: str = None, 
+                          update_database: bool = None, save_config_file: bool = None):
         """
         运行定时任务（模拟Java项目的@Scheduled注解）
         
         Args:
-            username: 用户名
-            password: 密码
-            update_database: 是否更新数据库
-            save_config_file: 是否保存配置文件
+            username: 用户名（可选，默认使用配置文件中的用户名）
+            password: 密码（可选，默认使用配置文件中的密码）
+            update_database: 是否更新数据库（可选，默认使用配置文件中的设置）
+            save_config_file: 是否保存配置文件（可选，默认使用配置文件中的设置）
         """
         logger.info("执行定时任务...")
         self.run_full_process(username, password, update_database, save_config_file)
 
 
-def run_scheduler(username: str, password: str, update_database: bool = True, interval_minutes: int = 1, save_config_file: bool = True):
+def run_scheduler(config_manager: ConfigManager):
     """
     运行定时调度器
     
     Args:
-        username: 用户名
-        password: 密码
-        update_database: 是否更新数据库
-        interval_minutes: 执行间隔（分钟）
-        save_config_file: 是否保存配置文件
+        config_manager: 配置管理器
     """
-    tdh = TDHAutoLogin(save_config_file=save_config_file)
+    scheduler_config = config_manager.get_scheduler_config()
+    interval_minutes = scheduler_config.get('interval_minutes', 1)
+    
+    tdh = TDHAutoLogin(config_manager)
     
     # 设置定时任务
-    schedule.every(interval_minutes).minutes.do(
-        tdh.run_scheduled_task, username, password, update_database, save_config_file
-    )
+    schedule.every(interval_minutes).minutes.do(tdh.run_scheduled_task)
     
     logger.info(f"定时调度器已启动，每 {interval_minutes} 分钟执行一次")
     
@@ -814,20 +881,30 @@ def run_scheduler(username: str, password: str, update_database: bool = True, in
 
 def main():
     """主函数"""
-    # 配置参数
-    BASE_URL = "https://172.18.135.37:8180"
-    USERNAME = "admin"  # 替换为实际用户名
-    PASSWORD = "admin"  # 替换为实际密码
-    SAVE_CONFIG_FILE = False  # 新增：是否保存配置文件
-    
-    # 创建TDH自动登录实例
-    tdh = TDHAutoLogin(BASE_URL, save_config_file=SAVE_CONFIG_FILE)
-    
-    # 运行完整流程（包括数据库更新）
-    tdh.run_full_process(USERNAME, PASSWORD, update_database=True, save_config_file=SAVE_CONFIG_FILE)
-    
-    # 可选：启动定时调度器（模拟Java项目的定时任务）
-    run_scheduler(USERNAME, PASSWORD, update_database=True, interval_minutes=1, save_config_file=SAVE_CONFIG_FILE)
+    try:
+        # 加载配置
+        config_manager = ConfigManager()
+        
+        # 创建TDH自动登录实例
+        tdh = TDHAutoLogin(config_manager)
+        
+        # 检查是否启用定时任务
+        scheduler_config = config_manager.get_scheduler_config()
+        if scheduler_config.get('enabled', False):
+            # 运行定时调度器
+            run_scheduler(config_manager)
+        else:
+            # 运行完整流程（包括数据库更新）
+            tdh.run_full_process()
+            
+    except FileNotFoundError as e:
+        logger.error(f"配置文件错误: {str(e)}")
+        print(f"\n错误: {str(e)}")
+        print("请确保 config.yaml 文件存在且格式正确")
+    except Exception as e:
+        logger.error(f"程序运行错误: {str(e)}")
+        print(f"\n程序运行错误: {str(e)}")
+        print("请检查配置文件和相关设置")
 
 
 if __name__ == "__main__":
